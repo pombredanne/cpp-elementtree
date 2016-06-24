@@ -1,41 +1,68 @@
 
-CXX = clang++-mp-3.3
-LIBXML2_ROOT ?= /opt/local
-GOOGLETEST_ROOT ?= /opt/local
+UNAME = $(shell uname)
 
-# LDFLAGS += -arch i386
 ifdef RELEASE
 CXXFLAGS += -O2
 CXXFLAGS += -DNDEBUG
-else
-CXXFLAGS += -g
 endif
 
-CXXFLAGS += -I$(LIBXML2_ROOT)/include/libxml2
+CXXFLAGS += -Wunused -Wall
+CXXFLAGS += -g -fno-omit-frame-pointer
 CXXFLAGS += -std=c++0x
-CXXFLAGS += -fno-rtti
-CXXFLAGS += -stdlib=libc++
+# CXXFLAGS += -stdlib=libc++
+CXXFLAGS += $(shell pkg-config --cflags libxml-2.0)
 
-LDFLAGS += -L$(LIBXML2_ROOT)/lib
-LDFLAGS += -L$(GOOGLETEST_ROOT)/lib
-#LDFLAGS += -liconv
+ifdef LTO
+CXXFLAGS += -Os
+CXXFLAGS += -flto
+LDFLAGS += -flto
+endif
+
 LDFLAGS += -lz
 LDFLAGS += -lxml2
+LDFLAGS += $(shell pkg-config --libs libxml-2.0)
 
-GOOGLETEST_LDFLAGS += -lgtest -lgtest_main
-GOOGLETEST_CXXFLAGS += -I$(GOOGLETEST_ROOT)/include
-GOOGLETEST_CXXFLAGS += -DGTEST_HAS_TR1_TUPLE=0
-GOOGLETEST_CXXFLAGS += -DGTEST_USE_OWN_TR1_TUPLE
-GOOGLETEST_CXXFLAGS += -DGTEST_HAS_RTTI=0
+all: targets
 
-play: play.cc fileutil.cpp element.cpp feed.cpp feed-util.cpp
+
+TARGETS += test_main
+test_main: \
+		test_main.cpp \
+		test_attrib.o \
+		test_element.o \
+		test_feed.o \
+		test_nullable.o \
+		test_parse.o \
+		test_qname.o \
+		test_xpath.o \
+		element.o \
+		feed.o \
+		feed-util.o
+
+TARGETS += convert_feed
+convert_feed: \
+	convert_feed.cpp \
+	element.o \
+	feed.o \
+	feed-util.o
+
+TARGETS += sanitize
+sanitize: \
+	sanitize.cpp \
+	element.o \
+	feed.o \
+	feed-util.o
 
 element.cpp: element.hpp
 feed.cpp: feed.hpp
 
-test_element: LDFLAGS+=$(GOOGLETEST_LDFLAGS)
-test_element: CXXFLAGS+=$(GOOGLETEST_CXXFLAGS)
-test_element: test_element.cpp element.cpp
+coverage:
+	$(MAKE) clean
+	CXXFLAGS=--coverage $(MAKE) test_main
+	./test_main
+	lcov --directory . --base-directory . --gcov-tool ./llvm-gcov.sh --capture -o cov.info
+	genhtml cov.info -o output
+	open output/index.html
 
 noexist:
 
@@ -54,4 +81,6 @@ pushdocs: noexist
 	git pull
 
 clean:
-	rm -f play *.o *.a
+	rm -rf $(TARGETS) *.o *.a output *.gcda *.gcno cov.info docs *.dSYM
+
+targets: $(TARGETS)

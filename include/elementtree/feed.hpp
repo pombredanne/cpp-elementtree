@@ -31,16 +31,11 @@ class ItemFormat;
 // Internal.
 time_t parseRfc822Date_(std::string);
 time_t parseIso8601Date_(std::string s);
-void stripWs_(std::string &s);
-
-
-/**
- * Wrap an Element containing a feed and return a reference.
- *
- * @param elem  Parsed feed as an Element.
- * @returns     Feed reference.
- */
-Feed fromelement(Element elem);
+std::string stripWs_(const std::string &s);
+std::string
+formatIso8601_(time_t t);
+std::string
+formatRfc822_(time_t t);
 
 
 /**
@@ -66,16 +61,42 @@ enum content_type {
 
 
 /**
+ * Create a new completely empty feed in the specified format.
+ */
+Feed create(enum feed_format format);
+
+
+/**
+ * Wrap an Element containing a feed and return a reference.
+ *
+ * @param elem  Parsed feed as an Element.
+ * @returns     Feed reference.
+ */
+Feed fromelement(Element elem);
+
+
+Item itemFromElement(Element elem, enum feed_format format);
+
+
+/**
  * Represent a single feed item. Use Feed::makeItem() to make an instance.
  */
 class Item
 {
+    template<typename T>
+    friend FeedFormat &formatFor__(const T &);
+
     const ItemFormat &format_;
     Element elem_;
 
     public:
     Item(const Item &);
     Item(const ItemFormat &, const Element &);
+
+    /**
+     * Remove this item from its parent feed, if any.
+     */
+    void remove();
 
     /**
      * Return the item title.
@@ -133,7 +154,8 @@ class Item
     /**
      * Set the item author name.
      *
-     * @param s     New author name.
+     * @param author
+     *      New author name.
      */
     void author(const std::string &author);
 
@@ -165,9 +187,23 @@ class Item
     /**
      * Set the item's published date as a UNIX timestamp.
      *
-     * @param created       Published date.
+     * @param published
+     *      Published date.
      */
     void published(time_t published);
+
+    /**
+     * Return the item's updated date as a UNIX timestamp.
+     */
+    time_t updated() const;
+
+    /**
+     * Set the item's updated date as a UNIX timestamp.
+     *
+     * @param updated
+     *      updated date.
+     */
+    void updated(time_t updated);
 
     Element element() const;
 };
@@ -178,6 +214,9 @@ class Item
  */
 class Feed
 {
+    template<typename T>
+    friend FeedFormat &formatFor__(const T &);
+
     const FeedFormat &format_;
     Element elem_;
 
@@ -191,20 +230,75 @@ class Feed
      */
     enum feed_format format() const;
 
+    /**
+     * Fetch the feed title.
+     */
     std::string title() const;
+
+    /**
+     * Set the feed title.
+     */
     void title(const std::string &s);
 
+    /**
+     * Fetch the feed's link, which is usually its associated web site or topic
+     * page.
+     */
     std::string link() const;
+
+    /**
+     * Set the feed's link.
+     */
     void link(const std::string &s);
 
+    /**
+     * Fetch the feed description.
+     */
     std::string description() const;
+
+    /**
+     * Set the feed description.
+     */
     void description(const std::string &s);
 
+    /**
+     * Fetch the feed icon URL.
+     */
     std::string icon() const;
-    void icon(std::string s);
 
+    /**
+     * Set the feed icon URL.
+     */
+    void icon(const std::string &s);
+
+    /**
+     * Fetch a vector of all the feed's items.
+     */
     std::vector<Item> items() const;
 
+    /**
+     * Create an empty item in the correct format and append it to this feed.
+     * Avoids a potentially redundant conversion in the case of populating a
+     * brand new feed.
+     *
+     * @returns
+     *      The new item.
+     */
+    Item append();
+
+    /**
+     * Append an item to this feed, removing it from its present feed. If the
+     * destination feed differs in format from the item, the item is converted
+     * in-place, discarding any non-essential data.
+     *
+     * @param item
+     *      Item to append.
+     */
+    void append(Item item);
+
+    /**
+     * Fetch the underlying etree::Element representing the feed.
+     */
     Element element() const;
 };
 

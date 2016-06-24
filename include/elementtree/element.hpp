@@ -10,18 +10,26 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <mutex>
+
 
 #if __cplusplus >= 201103L
 #   include <initializer_list>
 #   include <utility>
 #   define ETREE_0X
+#   define ETREE_EXPLICIT explicit
+#else
+#   define ETREE_EXPLICIT
 #endif
 
 
 // libxml forwards.
-struct _xmlNode;
+struct _xmlAttr;
 struct _xmlDoc;
+struct _xmlNode;
+struct _xmlNs;
 struct _xmlXPathCompExpr;
+struct _xmlXPathContext;
 
 
 /**
@@ -37,9 +45,12 @@ class Element;
 class ElementTree;
 class QName;
 class ChildIterator;
+class XPath;
+class XPathContext;
 
 #ifdef ETREE_0X
 typedef std::pair<string, string> kv_pair;
+typedef std::pair<string, string> ns_pair;
 typedef std::initializer_list<kv_pair> kv_list;
 #endif
 
@@ -73,8 +84,12 @@ Element SubElement(Element &parent, const QName &qname, kv_list attribs);
  * Parse an XML document from a character array and return a reference to its
  * root node.
  *
- * @param s             XML document as a string.
- * @returns             Root Element.
+ * @param s
+ *      XML document as a string.
+ * @param n
+ *      Number of bytes to consume. If zero, assumes s is NUL-terminated.
+ * @returns
+ *      Root Element.
  */
 Element fromstring(const char *s, size_t n=0);
 
@@ -85,6 +100,14 @@ Element fromstring(const char *s, size_t n=0);
  * @returns             UTF-8 encoded string.
  */
 string tostring(const Element &e);
+
+/**
+ * Serialize a tree. See ElementTree::tostring() for another variant.
+ *
+ * @param e             Element to serialize.
+ * @returns             UTF-8 encoded string.
+ */
+string tostring(const ElementTree &e);
 
 /**
  * Parse an XML document from a STL istream and return it.
@@ -195,16 +218,6 @@ std::ostream &operator<< (std::ostream &out, const Element &elem);
  */
 std::ostream &operator<< (std::ostream &out, const QName &qname);
 
-/**
- * Return true if <strong>parent</strong> is an indirect parent of
- * <strong>child</strong>.
- *
- * @param parent        Potential parent.
- * @param child         Potential child.
- * @returns             True if \c child descends from \c parent.
- */
-bool isTransitiveParent(const Element &parent, const Element &child);
-
 
 /**
  * Lightweight wrapper to add nullable semantics to another type. This template
@@ -225,7 +238,9 @@ bool isTransitiveParent(const Element &parent, const Element &child);
  */
 template<typename T>
 class Nullable {
-    /// Storage for contained type. This hack needs removed.
+    /// Storage for contained type. This allows an unset nullable to truly have
+    //no constructed value, and also allows the value type to lack a default
+    //constructor.
     unsigned char val_[sizeof(T)];
 
     /// True if val_ contains a value.
@@ -238,14 +253,14 @@ class Nullable {
     Nullable();
 
     /**
-     * Construct an unset Nullable containing a copy of the given value.
+     * Construct a set Nullable containing a value.
      *
      * @param val       Value to copy.
      */
     Nullable(const T &val);
 
     /**
-     * Construct a set Nullable containing a copy of the given value.
+     * Copy the value from another Nullable.
      *
      * @param val       Value to copy.
      */
@@ -253,7 +268,7 @@ class Nullable {
 
     #ifdef ETREE_0X
     /**
-     * C++11: construct a set Nullable by moving the given value.
+     * C++11: construct a set Nullable by moving a value.
      *
      * @param val       Value to copy.
      */
@@ -269,7 +284,14 @@ class Nullable {
      * Return true if both nullables are empty, or both nullables contain the
      * same value.
      */
-    bool operator==(const Nullable<T> &other);
+
+    bool operator==(const Nullable<T> &other) const;
+
+    /**
+     * Return true if both nullables are empty, or both nullables contain the
+     * same value.
+     */
+    bool operator==(const T &other) const;
 
     /**
      * Copy the instance and its contained value, if any.
@@ -279,17 +301,27 @@ class Nullable {
     /**
      * Evaluate to true if this Nullable is set.
      */
-    operator bool() const;
+    ETREE_EXPLICIT operator bool() const;
 
     /**
      * Return the contained value, or throw missing_value_error().
      */
     T &operator *();
 
+    /*
+     * Return the contained value, or throw missing_value_error().
+     */
+    T *operator ->();
+
     /**
      * Return the contained value, or throw missing_value_error().
      */
     const T &operator *() const;
+
+    /**
+     * Return the contained value, or throw missing_value_error().
+     */
+    const T *operator ->() const;
 };
 
 /**
@@ -313,8 +345,6 @@ class QName {
 
     /// Tag part.
     string tag_;
-
-    void fromString_(const string &qname);
 
     public:
     /**
@@ -364,18 +394,66 @@ class QName {
     const string &ns() const;
 
     /**
+     * Return true if the (raw) strings match the QName's content.
+     *
+     * @param ns
+     *      NULL, or the namespace URI.
+     * @param tag
+     *      The tag.
+     */
+    bool equals(const char *ns, const char *tag) const;
+
+    /**
      * Compare this QName to another.
      *
      * @param other     Other QName.
      * @returns         True if equal.
      */
-    bool operator==(const QName &other);
+    bool operator==(const QName &other) const;
+
+    /**
+     * Compare this QName to another.
+     *
+     * @param other     Other QName.
+     * @returns         False if equal.
+     */
+    bool operator!=(const QName &other) const;
 };
+
+
+/**
+ * Represent a list of namespaces and their associated prefixes that should be
+ * defined while executing an XPath expression.
+ */
+typedef std::vector<std::pair<std::string, std::string>> ns_list;
+
+
+/**
+ * Manages a set of registered XPath namespaces and extension functions. Note
+ * that this object is internally synchronized across threads, consider copying
+ * it in each thread.
+ */
+class XPathContext {
+    _xmlXPathContext *context_;
+    std::mutex mtx_;
+
+    // For mutex().
+    friend XPath;
+
+    public:
+    ~XPathContext();
+    XPathContext(const etree::ns_list &ns_list = {});
+    XPathContext(const XPathContext &other);
+};
+
 
 /**
  * Manages a compiled XPath expression.
  */
 class XPath {
+    /** The context to execute within, or NULL for no context. */
+    const XPathContext *context_;
+
     /** The underlying compiled expression. */
     _xmlXPathCompExpr *expr_;
 
@@ -401,6 +479,16 @@ class XPath {
      * @param s         XPath expression.
      */
     XPath(const string &s);
+
+    /**
+     * Compile an expression from a STL string.
+     *
+     * @param s
+     *      XPath expression.
+     * @param context
+     *      XPathContext object.
+     */
+    XPath(const string &s, const XPathContext &context);
 
     /**
      * Copy an expression.
@@ -438,28 +526,93 @@ class XPath {
     vector<Element> findall(const Element &e) const;
 
     /**
+     * Like XPath::findall, except remove each discovered element before
+     * returning it.
+     */
+    vector<Element> removeall(Element &expr) const;
+
+    /**
      * Return the text part of the first matching element.
      *
-     * @param e         Root element to search from.
-     * @returns         Text part of the first matching element, or the empty
-     *                  string.
+     * @param e
+     *      Root element to search from.
+     * @param default_
+     *      String to return if text is not found.
+     * @returns
+     *      Text part of the first matching element, or the empty string.
      */
-    string findtext(const Element &e) const;
+    string findtext(const Element &e, const string &default_="") const;
 };
 
 
+/**
+ * Proxy value type yielded by AttrIterator.
+ */
+class Attribute
+{
+    _xmlAttr *attr_;
+
+    public:
+    Attribute(_xmlAttr *attr);
+
+    /**
+     * Return the attributes's tag name.
+     */
+    string tag() const;
+
+    /**
+     * Return the attributes's namespace.
+     */
+    string ns() const;
+
+    /**
+     * Return the attributes's QName.
+     */
+    QName qname() const;
+
+    /**
+     * Return the attribute's value.
+     */
+    string value() const;
+};
+
+
+/**
+ * Represents iteration position produced by AttrMap::begin() and
+ * AttrMap::end().
+ *
+ * AttrIterator caches its next pointer, so that it is safe to delete an
+ * attribute via Element.attrib().remove() during iteration.
+ *
+ * AttrIterator holds a reference to its parent Element, so that it is safe to
+ * remove the element from its source document during iteration.
+ */
 class AttrIterator
 {
     _xmlNode *node_;
+    _xmlAttr *attr_;
+    _xmlAttr *next_;
 
     public:
-    AttrIterator(_xmlNode *elem);
-    QName key();
-    string value();
-    bool next();
+    ~AttrIterator();
+    AttrIterator();
+    AttrIterator(_xmlNode *elem, _xmlAttr *attr);
+
+    bool operator ==(const AttrIterator &other);
+    bool operator !=(const AttrIterator &other);
+
+    /**
+     * Yield an Attribute representing the attribute at this position.
+     */
+    const Attribute operator *();
+
+    AttrIterator &operator++();
 };
 
 
+/**
+ * Represents a mapping of an Element's attribute names to their values.
+ */
 class AttrMap
 {
     _xmlNode *node_;
@@ -468,13 +621,73 @@ class AttrMap
     ~AttrMap();
     AttrMap(_xmlNode *elem);
 
+    /**
+     * Produce an AttrIterator pointing to the first attribute.
+     */
+    AttrIterator begin() const;
+
+    /**
+     * Produce an AttrIterator pointing past the last attribute.
+     */
+    AttrIterator end() const;
+
+    /**
+     * Return true if the Element has the named attribute.
+     */
     bool has(const QName &qname) const;
+
+    /**
+     * Return an attribute's value, or some default.
+     *
+     * @param qname
+     *      Attribute QName.
+     * @param default_
+     *      String to return if attribute is not found.
+     */
     string get(const QName &qname, const string &default_="") const;
+
+    /**
+     * Add or replace attribute's value.
+     *
+     * @param qname
+     *      Attribute QName.
+     * @param s
+     *      New attribute value.
+     */
     void set(const QName &qname, const string &s);
+
+    #ifdef ETREE_0X
+    /**
+     * C++0x: set multiple attribute values in a single call.
+     *
+     * @param attribs
+     *      std::initializer_list of (QName, value) pairs.
+     */
+    void set(kv_list attribs);
+    #endif
+
+    /**
+     * Return the QNames of all attributes present on the Element.
+     */
     vector<QName> keys() const;
+
+    /**
+     * Remove an attribute if it exists, returning true if deletion occured.
+     */
+    bool remove(const QName &qname);
+
+    /**
+     * Return the number of attributes the element has.
+     */
+    size_t size() const;
 };
 
 
+/**
+ * Represents a reference to the root of an XML tree, the document itself. Note
+ * that an element's documents are created and destroyed dynamically in
+ * response to Element::insert(), Element::append() and Element::remove().
+ */
 class ElementTree
 {
     template<typename P, typename T>
@@ -487,6 +700,25 @@ class ElementTree
     ElementTree();
     ElementTree(_xmlDoc *doc);
     Element getroot() const;
+
+    /**
+     * Return true if the identity of this element is equal to another element,
+     * i.e. both refer to the same DOM node in the same document.
+     */
+    bool operator==(const ElementTree &other) const;
+
+    /**
+     * Return true if the identity of this element is equal to another element,
+     * i.e. both refer to the same DOM node in the same document.
+     */
+    bool operator!=(const ElementTree &other) const;
+
+    /**
+     * Replace this <strong>element reference</strong> with an element.
+     * Note the underlying DOM node is not modified, only the reference is
+     * updated.
+     */
+    ElementTree &operator=(const ElementTree&);
 };
 
 
@@ -520,34 +752,45 @@ class Element
 
     /**
      * \internal
-     * Construct a new reference to the given internal node implementation.
+     * Construct a reference to a DOM node.
      *
      * @param node  Element to reference.
      */
     Element(_xmlNode *node);
 
     /**
-     * Construct an element with the given name, creating a dummy ElementTree
-     * to contain it. Due to the need to have a dummy document to contain
-     * orphaned elements, it is often better to use SubElement() instead.
+     * Construct an element, creating a dummy ElementTree to contain it. Due to
+     * the need to have a dummy document to contain orphaned elements, it is
+     * better to use SubElement() when possible.
      *
-     * @param qname     New element name.
+     * @param qname
+     *      New element name.
      */
     Element(const QName &qname);
 
     #ifdef ETREE_0X
     /**
-     * C++11: construct an element with the given name and attributes, creating
-     * a dummy ElementTree to contain it. Due to the need to have a dummy
-     * document to contain orphaned elements, it is often better to use
-     * SubElement() instead.
+     * C++11: construct an element, creating a dummy ElementTree to contain it.
+     * Due to the need to have a dummy document to contain orphaned elements,
+     * it is better to use SubElement() when possible.
      *
-     * @param qname     New element name.
-     * @param attribs   List of attribute name-value pairs from initialization
-     *                  list.
+     * @param qname
+     *      New element name.
+     * @param attribs
+     *      List of attribute name-value pairs from initialization list.
      */
     Element(const QName &qname, kv_list attribs);
     #endif
+
+    /**
+     * Ensure a namespace is in scope for this element, or is defined on this
+     * element. Consider calling this if you're going to be defining lots of
+     * subelements or attributes on this element belonging to the namespace.
+     *
+     * @param uri
+     *      The namespace URI.
+     */
+    void ensurens(const string &uri);
 
     /**
      * Return the element's QName.
@@ -605,10 +848,16 @@ class Element
     Element operator[] (size_t i);
 
     /**
-     * Return true if the identity of this element is equal to the given
-     * element, i.e. both references refer to the same DOM node.
+     * Return true if the identity of this element is equal to another Element,
+     * i.e. both refer to the same DOM node.
      */
-    bool operator==(const Element &other);
+    bool operator==(const Element &other) const;
+
+    /**
+     * Return false if the identity of this Element is equal to another
+     * Element, i.e. both refer to the same DOM node.
+     */
+    bool operator!=(const Element &other) const;
 
     /**
      * Replace this <strong>element reference</strong> with an element.
@@ -618,20 +867,47 @@ class Element
     Element &operator=(const Element&);
 
     /**
-     * Return the first child with the given name, if any.
+     * Return the first, if any exist.
      *
-     * @param qn        Name of the child to locate.
-     * @returns         Element, if any, otherwise an empty nullable.
+     * @returns
+     *      Element, if any, otherwise an empty nullable.
+     */
+    Nullable<Element> child() const;
+
+    /**
+     * Return the first child matching a name, if any exist.
+     *
+     * @param qn
+     *      Name of the child to locate.
+     * @returns
+     *      Element, if any, otherwise an empty nullable.
      */
     Nullable<Element> child(const QName &qn) const;
 
     /**
-     * Return children with the given name.
+     * Like child(), except appends the element if it was missing.
+     *
+     * @param qn
+     *      Name of the child to create or locate.
+     * @returns
+     *      The element.
+     */
+    Element ensurechild(const QName &qn);
+
+    /**
+     * Return children matching a name.
      *
      * @param qn        Name of the children to locate.
      * @returns         Vector of elements.
      */
     vector<Element> children(const QName &qn) const;
+
+    /**
+     * Return all children.
+     *
+     * @returns         Vector of elements.
+     */
+    vector<Element> children() const;
 
     /**
      * Execute an XPath expression rooted on this element.
@@ -644,11 +920,14 @@ class Element
     /**
      * \copybrief XPath::findtext
      *
-     * @param expr      XPath expression to match.
-     * @returns         Text part of the first matching element, or the empty
-     *                  string.
+     * @param expr
+     *      XPath expression to match.
+     * @param default_
+     *      String to return if text is not found.
+     * @returns
+     *      Text part of the first matching element, or the empty string.
      */
-    string findtext(const XPath &expr) const;
+    string findtext(const XPath &expr, const string &default_="") const;
 
     /**
      * \copybrief XPath::findall
@@ -657,6 +936,12 @@ class Element
      * @returns         Matching elements.
      */
     vector<Element> findall(const XPath &expr) const;
+
+    /**
+     * Like XPath::findall, except remove each discovered element before
+     * returning it.
+     */
+    vector<Element> removeall(const XPath &expr);
 
     /**
      * Append an element to this element.
@@ -682,8 +967,11 @@ class Element
      * \note
      *  All existing Element objects automatically update to the new location.
      *
-     * @param i         Index to insert element at (0..size()-1).
-     * @param e         Element to append as a child.
+     * @param i
+     *      Index to insert element at (0..size()-1). If the index is greater
+     *      than size(), behaves like append().
+     * @param e
+     *      Element to append as a child.
      */
     void insert(size_t i, Element &e);
 
@@ -706,6 +994,41 @@ class Element
      * should call insert() or append() directly.
      */
     void remove();
+
+    /**
+     * Remove this element from its parent, moving any child nodes to the
+     * element's old place in the DOM tree. You cannot graft the root node.
+     *
+     * \code{.cpp}
+     *      auto elem = etree::fromstring(
+     *          "<root>"
+     *              "<tag1/> Hello"
+     *              "<tag2>"
+     *                  "<tag3/>"
+     *              "</tag2> there"
+     *          "</root>"
+     *      );
+     *      elem.child("tag2")->graft();
+     *      assert(etree::tostring(elem) == (
+     *          "<root>"
+     *              "<tag1/> Hello"
+     *              "<tag3/> there"
+     *          "</root>"
+     *      ));
+     * \endcode
+     */
+    void graft();
+
+    /**
+     * Copy this element and all elements below it to a new document, returning
+     * a reference to the newly copied element.
+     */
+    Element copy();
+
+    /**
+     * Return true if this is an ancestor of some element.
+     */
+    bool ancestorOf(const Element &e) const;
 
     /**
      * Return the next sibling element, if any.
@@ -768,11 +1091,22 @@ class Element
      */
     void tail(const string &s);
 
-    ChildIterator begin();
-    ChildIterator end();
+    /**
+     * Produce a ChildIterator pointing at the first child.
+     */
+    ChildIterator begin() const;
+
+    /**
+     * Produce a ChildIterator pointing past the final child.
+     */
+    ChildIterator end() const;
 };
 
 
+/**
+ * Represents iteration position produced by Element::begin() and
+ * Element::end().
+ */
 class ChildIterator
 {
     Nullable<Element> elem_;
@@ -783,17 +1117,30 @@ class ChildIterator
     ChildIterator(const ChildIterator &);
     ChildIterator operator++(int);
     ChildIterator operator++();
-    bool operator==(const ChildIterator &);
-    bool operator!=(const ChildIterator &);
+    bool operator==(const ChildIterator &) const;
+    bool operator!=(const ChildIterator &) const;
+
+    /**
+     * Yield an Element representing the child at this position.
+     */
     Element &operator*();
 };
 
 
+/**
+ * Depth-first visit an element and all of its subelements.
+ *
+ * @param elem
+ *      Element to visit.
+ * @param func
+ *      Function called as (void)func(Element&);
+ */
 template<typename Function>
-void visit(Element &elem, Function func)
+void
+visit(Element elem, Function func)
 {
     func(elem);
-    for(auto &child : elem) {
+    for(auto &child : elem.children()) {
         visit(child, func);
     }
 }
@@ -805,7 +1152,6 @@ void visit(Element &elem, Function func)
     };
 
 EXCEPTION(cyclical_tree_error)
-EXCEPTION(element_error)
 EXCEPTION(internal_error)
 EXCEPTION(invalid_xpath_error)
 EXCEPTION(memory_error)
@@ -818,12 +1164,27 @@ EXCEPTION(serialization_error)
 
 #undef EXCEPTION
 
+
+/**
+ * Thrown to indicate libxml2 raised a parse error.
+ */
 struct xml_error : public std::runtime_error
 {
-    xml_error(const char *s) : std::runtime_error(s) {}
+    xml_error(const char *s)
+        : std::runtime_error(s) {}
 };
 
 
 } // namespace
+
+
+namespace std {
+    template<>
+    struct hash<etree::QName>
+    {
+        size_t operator()(const etree::QName &x) const;
+    };
+} // namespace
+
 
 #endif
